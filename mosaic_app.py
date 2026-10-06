@@ -18,6 +18,10 @@ APP_NAME = "Pixelate"
 ICON_NAME = "icon.ico"
 SETTINGS_FILE = "settings.json"
 HISTORY_LIMIT = 50
+MAX_PREVIEW_PIXELS = 4_000_000
+GRID_LINE_LIMIT = 600
+ERASED_PATTERN_BUDGET = 240
+ERASED_CHECKER_PX = 7
 PALETTE_SIZE = 8
 FIXED_COLORS = ["#FFC700", "#FFFFFF", "#9E9E9E", "#4A4A4A", "#000000"]
 DEFAULT_NAME_TEMPLATE = "{原名}_马赛克_{倍率}"
@@ -496,9 +500,26 @@ def _hex_to_rgb(text):
     return tuple(int(text[i : i + 2], 16) for i in (0, 2, 4))
 
 
+def has_alpha(img):
+    """PNG 透明区（RGBA / LA / 调色板带 transparency）必须保留，否则会被烤成黑块。"""
+    if img.mode in ("RGBA", "LA"):
+        return True
+    return img.mode == "P" and "transparency" in img.info
+
+
 def extract_palette(img, count=8, min_distance=28, sample=48):
-    """从图里取主色：缩到 sample×sample 计数，按占比排序，距离太近的合并掉。"""
-    small = img.convert("RGB").resize((sample, sample), Image.Resampling.NEAREST)
+    """从图里取主色：缩到 sample×sample 计数，按占比排序，距离太近的合并掉。
+
+    带透明的图先叠到白底上，否则透明区的黑色会污染调色盘。
+    """
+    small = img.resize((sample, sample), Image.Resampling.NEAREST)
+    if small.mode == "RGBA":
+        if small.getchannel("A").getextrema()[0] < 255:
+            white = Image.new("RGBA", small.size, (255, 255, 255, 255))
+            small = Image.alpha_composite(white, small)
+        small = small.convert("RGB")
+    else:
+        small = small.convert("RGB")
     colors = small.getcolors(sample * sample + 1) or []
     colors.sort(key=lambda pair: -pair[0])
     picked = []
@@ -612,6 +633,8 @@ class MosaicApp:
         self._stroke_cells = set()
         self._draw_size = (1, 1)
         self._draw_pos = None
+        self._rev = 0
+        self._photo_cache = None
         self._swatches = []
 
         self.dark = load_theme_pref() == "dark"
@@ -642,6 +665,9 @@ class MosaicApp:
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<B1-Motion>", self.on_canvas_motion)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+        self.canvas.bind("<ButtonPress-2>", self.on_middle_press)
+        self.canvas.bind("<B2-Motion>", self.on_middle_motion)
+        self.canvas.bind("<ButtonRelease-2>", self.on_middle_release)
         self._build_overlay(left)
         root.bind("<KeyPress-space>", self._on_space_down)
         root.bind("<KeyRelease-space>", self._on_space_up)
@@ -1030,6 +1056,17 @@ class MosaicApp:
         self.pan_start = None
         self.anchor_start = None
 
+    def on_middle_press(self, event):
+        """中键拖拽 = 任何工具下都能平移。"""
+        self.on_pan_start(event)
+
+    def on_middle_motion(self, event):
+        self.on_pan_move(event)
+
+    def on_middle_release(self, event):
+        self.pan_start = None
+        self.anchor_start = None
+
     def _pick_cell(self, cell):
         """吸管：取该格当前显示的颜色（编辑过的也算数，所见即所得）。"""
         item = self.current
@@ -1055,6 +1092,7 @@ class MosaicApp:
         item.patches.append(EditPatch(*rect, color))
         if self.preview_img is not None:
             self.preview_img = apply_patches(self.preview_img, [item.patches[-1]])
+            self._rev += 1
         self.redraw_preview()
 
     def _focused_entry(self):
@@ -1278,7 +1316,10 @@ class MosaicApp:
             try:
                 img = Image.open(p)
                 img = ImageOps.exif_transpose(img)
-                img = img.convert("RGB")
+                if has_alpha(img):
+                    img = img.convert("RGBA")   # 保留原有透明区，别转成 RGB 把它烤成黑块
+                else:
+                    img = img.convert("RGB")
                 items.append(QueueItem(p, img, DEFAULT_NAME_TEMPLATE))
             except Exception as e:
                 errors.append(f"{os.path.basename(p)}: {e}")
@@ -1406,6 +1447,7 @@ class MosaicApp:
         self._sync_grid_box()
         self.mosaic_img = apply_mosaic(item.img, grid)
         self.preview_img = apply_patches(self.mosaic_img, item.patches)
+        self._rev += 1
         total = len(self.queue)
         pos = f"（第 {self.index + 1}/{total} 张）" if total > 1 else ""
         label = grid_label(self.grid_mode, item.img.size)
@@ -1424,10 +1466,11 @@ class MosaicApp:
             return
         w, h = item.img.size
         left, top = ax - tw / 2, ay - th / 2
-        step = 7
-        for p in item.patches:
-            if p.color is not None:
-                continue
+        holes = [p for p in item.patches if p.color is None]
+        if not holes:
+            return
+        budget = ERASED_PATTERN_BUDGET
+        for p in holes:
             x0 = left + p.x0 / w * tw
             y0 = top + p.y0 / h * th
             x1 = left + p.x1 / w * tw
@@ -1435,8 +1478,10 @@ class MosaicApp:
             self.canvas.create_rectangle(
                 x0, y0, x1, y1, fill="#EDEDED", outline=self.c["border_active"]
             )
-            if (x1 - x0) * (y1 - y0) / (step * step) > 400:
+            if budget <= 0:
                 continue
+            # 方块数按面积分摊到预算内，块太大就退化成纯色
+            step = max(7, int(((x1 - x0) * (y1 - y0) / budget) ** 0.5) + 1)
             rows = int((y1 - y0) // step) + 1
             cols = int((x1 - x0) // step) + 1
             for ry in range(rows):
@@ -1449,6 +1494,7 @@ class MosaicApp:
                         sx, sy, min(sx + step, x1), min(sy + step, y1),
                         fill="#B4B4B4", outline="",
                     )
+            budget -= max(rows * cols // 2, 1)
 
     def _hint_text(self, z):
         tips = {
@@ -1458,6 +1504,51 @@ class MosaicApp:
             "erase": "左键抠掉格子（可拖动），空格拖动平移",
         }
         return f"{z * 100:.0f}%  |  {tips.get(self.tool, '')}  |  滚轮缩放，双击复原"
+
+    def _checker_bg(self, tw, th):
+        """7px 棋盘格底：在目标分辨率上按行拼出来。
+
+        别想着「画个小 tile 再放大」——NEAREST 会把格子一起放大成大色块（踩过）。
+        """
+        k = ERASED_CHECKER_PX
+        w = max(tw // k * k, 2 * k)
+        h = max(th // k * k, 2 * k)
+        strips = []
+        for offset in (0, k):
+            strip = Image.new("RGB", (w, k), "#EDEDED")
+            d = ImageDraw.Draw(strip)
+            for x in range(offset, w, 2 * k):
+                d.rectangle([x, 0, x + k - 1, k - 1], fill="#B4B4B4")
+            strips.append(strip)
+        bg = Image.new("RGB", (w, h), "#EDEDED")
+        for row in range(h // k):
+            bg.paste(strips[row % 2], (0, row * k))
+        return bg.crop((0, 0, tw, th))
+
+    def _preview_rgb(self, tw, th):
+        """缩到 (tw, th) 并把透明区域画成棋盘格（所见即所得：棋盘格 = 导出后的透明）。"""
+        img = self.preview_img.resize((tw, th), Image.Resampling.NEAREST)
+        if img.mode != "RGBA":
+            return img
+        alpha = img.getchannel("A")
+        if alpha.getextrema()[0] == 255:
+            return img.convert("RGB")
+        return Image.composite(img.convert("RGB"), self._checker_bg(tw, th), alpha)
+
+    def _fit_buffer(self, tw, th):
+        """限制绘制缓冲大小：Tk 的 PhotoImage 是逐像素拷贝，放大到上万像素会爆内存。"""
+        if tw * th <= MAX_PREVIEW_PIXELS:
+            return tw, th
+        k = (MAX_PREVIEW_PIXELS / (tw * th)) ** 0.5
+        return max(int(tw * k), 1), max(int(th * k), 1)
+
+    def _photo_for(self, tw, th):
+        key = (tw, th, self._rev)
+        if self._photo_cache and self._photo_cache[0] == key:
+            return self._photo_cache[1]
+        photo = ImageTk.PhotoImage(self._preview_rgb(tw, th))
+        self._photo_cache = (key, photo)
+        return photo
 
     def redraw_preview(self):
         if not self.preview_img:
@@ -1477,6 +1568,7 @@ class MosaicApp:
         self.base_scale = base
         z = self.zoom
         tw, th = max(int(w * base * z), 1), max(int(h * base * z), 1)
+        tw, th = self._fit_buffer(tw, th)
         self._draw_size = (tw, th)
         self.preview_scale = base * z
         if self.anchor is None:
@@ -1484,16 +1576,15 @@ class MosaicApp:
         else:
             ax, ay = self.anchor
         self._draw_pos = (ax, ay)
-        photo = ImageTk.PhotoImage(
-            self.preview_img.resize((tw, th), Image.Resampling.NEAREST)
-        )
+        photo = self._photo_for(tw, th)
         self.canvas.delete("all")
         self.canvas.create_image(ax, ay, image=photo, anchor=tk.CENTER)
         if self.grid_lines.get():
             gw, gh = self.current_grid
             step_x, step_y = tw / gw, th / gh
             line_color = self.c["grid_line"]
-            if step_x >= 3 and step_y >= 3:
+            # 格太密就别画了：几千条线每次重绘都要重建，纯属自己找罪受
+            if step_x >= 3 and step_y >= 3 and gw + gh <= GRID_LINE_LIMIT:
                 x0, y0 = ax - tw / 2, ay - th / 2
                 for i in range(1, gw):
                     x = x0 + i * step_x

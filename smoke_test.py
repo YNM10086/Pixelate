@@ -146,6 +146,39 @@ assert render_mosaic(src, (5, 3)).getpixel((3, 2)) == (120, 160, 7, 255)
 assert render_name_template("{倍率}", "z", 1, 1, (5, 3)) == "5x3"
 assert apply_mosaic(src, (2, 3)).size == src.size
 print("native grid OK")
+
+# 透明区必须保留，不能被烤成黑块
+from mosaic_app import MAX_PREVIEW_PIXELS, has_alpha, MosaicApp
+
+rgba = Image.new("RGBA", (8, 8), (10, 20, 30, 255))
+rgba.putpixel((3, 3), (200, 0, 0, 0))
+assert has_alpha(rgba)
+assert not has_alpha(Image.new("RGB", (4, 4)))
+pal_img = Image.new("P", (4, 4))
+pal_img.info["transparency"] = 0
+assert has_alpha(pal_img), "调色板 PNG 的 transparency 也要认"
+assert not has_alpha(Image.new("L", (4, 4)))
+
+kept = Image.alpha_composite(Image.new("RGBA", (8, 8), (0, 0, 0, 0)), rgba)
+assert kept.getpixel((3, 3))[3] == 0, "透明像素仍是透明"
+assert kept.getpixel((0, 0))[3] == 255
+baked = rgba.convert("RGB").getpixel((3, 3))
+assert baked == (200, 0, 0), "这正是要避免的『透明被烤成实色』"
+
+# 透明区的颜色不能污染调色盘（叠白底后应接近白）
+clear = Image.new("RGBA", (40, 40), (10, 200, 10, 255))
+clear.paste((0, 0, 0, 0), (0, 0, 40, 20))
+pal = extract_palette(clear, count=4, min_distance=10)
+assert (10, 200, 10) in pal, pal
+assert not any(c == (0, 0, 0) for c in pal), f"透明区被当成黑色：{pal}"
+
+# 绘制缓冲上限：再大的缩放也不能超过 MAX_PREVIEW_PIXELS
+app = MosaicApp.__new__(MosaicApp)
+assert MosaicApp._fit_buffer(app, 40000, 40000)[0] * \
+    MosaicApp._fit_buffer(app, 40000, 40000)[1] <= MAX_PREVIEW_PIXELS
+assert MosaicApp._fit_buffer(app, 700, 500) == (700, 500), "正常尺寸不裁剪"
+assert MosaicApp._fit_buffer(app, 100, 100) == (100, 100)
+print("alpha & buffer OK")
 print("edits OK")
 
 from mosaic_app import QueueItem as _QI

@@ -107,6 +107,9 @@ assert out.getpixel((0, 0)) == (1, 1, 1, 255)
 assert cell_rect(100, 50, 4, 0, 0) == (0, 0, 25, 12)
 assert cell_rect(100, 50, 4, 3, 1) == (75, 12, 100, 25)
 assert cell_rect(10, 10, 128, 0, 0) == (0, 0, 1, 1), "格子比像素还密时不能出空块"
+assert cell_rect(100, 50, (4, 4), 0, 0) == (0, 0, 25, 12), "方形档用元组也要一致"
+assert cell_rect(100, 50, (10, 5), 1, 1) == (10, 10, 20, 20)
+assert cell_rect(900, 640, (900, 640), 5, 7) == (5, 7, 6, 8), "原分辨率=每像素一格"
 
 swatch = Image.new("RGB", (40, 40), (0, 0, 0))
 for y in range(40):
@@ -123,6 +126,26 @@ rendered = render_mosaic(Image.new("RGB", (40, 40), (0, 0, 0)), 4,
 assert rendered.size == (40, 40) and rendered.mode == "RGBA"
 assert rendered.getpixel((5, 5)) == (1, 2, 3, 255)
 assert rendered.getpixel((30, 30)) == (0, 0, 0, 255)
+
+# 原分辨率档：网格 = 像素尺寸 -> 输出与原图逐像素一致
+from mosaic_app import GRID_NATIVE, grid_dims, grid_label
+
+src = Image.new("RGB", (5, 3))
+sp = src.load()
+for x in range(5):
+    for y in range(3):
+        sp[x, y] = (x * 40, y * 80, 7)
+assert grid_dims(GRID_NATIVE, src.size) == (5, 3)
+assert grid_dims(64, src.size) == (64, 64)
+assert grid_label(GRID_NATIVE, src.size) == "原分辨率 5x3"
+assert grid_label(32, src.size) == "32x32"
+native = apply_mosaic(src, grid_dims(GRID_NATIVE, src.size))
+assert native.size == src.size
+assert native.tobytes() == src.tobytes(), "原分辨率不该改变任何像素"
+assert render_mosaic(src, (5, 3)).getpixel((3, 2)) == (120, 160, 7, 255)
+assert render_name_template("{倍率}", "z", 1, 1, (5, 3)) == "5x3"
+assert apply_mosaic(src, (2, 3)).size == src.size
+print("native grid OK")
 print("edits OK")
 
 from mosaic_app import QueueItem as _QI

@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageOps, ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 MOSAIC_GRIDS = [16, 24, 32, 48, 64, 96, 128]
+GRID_NATIVE = "native"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff")
 
 APP_NAME = "Pixelate"
@@ -277,22 +278,38 @@ def render_name_template(template, stem, index=1, total=1, grid=64):
     """把命名模板渲染成实际文件名（不含扩展名）。
 
     占位符：{原名} {序号} {总数} {倍率}；单张时序号/总数都是 01。
+    {倍率} 接受网格数（int 或 (gw, gh)），原分辨率档会写成实际像素尺寸。
     非法文件名字符换成下划线；模板为空或渲染全空时退回原名。
     """
     tpl = (template or "").strip() or DEFAULT_NAME_TEMPLATE
+    gw, gh = (int(grid), int(grid)) if isinstance(grid, int) else tuple(grid)
     name = (
         tpl.replace("{原名}", stem)
         .replace("{序号}", f"{index:02d}")
         .replace("{总数}", f"{total:02d}")
-        .replace("{倍率}", f"{grid}x{grid}")
+        .replace("{倍率}", f"{gw}x{gh}")
     )
     name = _ILLEGAL_NAME_CHARS.sub("_", name).strip().rstrip(". ")
     return name or stem
 
 
+def grid_dims(mode, size):
+    """倍率档位 → 实际网格数 (gw, gh)。native = 原图像素尺寸（1 像素 1 格）。"""
+    if mode == GRID_NATIVE:
+        return int(size[0]), int(size[1])
+    g = int(mode)
+    return g, g
+
+
+def grid_label(mode, size):
+    gw, gh = grid_dims(mode, size)
+    return f"原分辨率 {gw}x{gh}" if mode == GRID_NATIVE else f"{gw}x{gh}"
+
+
 def apply_mosaic(img, grid):
+    gw, gh = (int(grid), int(grid)) if isinstance(grid, int) else tuple(grid)
     w, h = img.size
-    return img.resize((grid, grid), Image.Resampling.NEAREST).resize(
+    return img.resize((gw, gh), Image.Resampling.NEAREST).resize(
         (w, h), Image.Resampling.NEAREST
     )
 
@@ -494,10 +511,16 @@ def extract_palette(img, count=8, min_distance=28, sample=48):
 
 
 def cell_rect(w, h, grid, i, j):
-    """第 (i, j) 个马赛克块在原图里的矩形 [x0, y0, x1, y1)。"""
-    x0 = i * w // grid
-    y0 = j * h // grid
-    return x0, y0, max(x0 + 1, (i + 1) * w // grid), max(y0 + 1, (j + 1) * h // grid)
+    """第 (i, j) 个马赛克块在原图里的矩形 [x0, y0, x1, y1)。grid 可以是方形数或 (gw, gh)。"""
+    gw, gh = (int(grid), int(grid)) if isinstance(grid, int) else tuple(grid)
+    x0 = i * w // gw
+    y0 = j * h // gh
+    return (
+        x0,
+        y0,
+        max(x0 + 1, (i + 1) * w // gw),
+        max(y0 + 1, (j + 1) * h // gh),
+    )
 
 
 def render_mosaic(img, grid, patches=()):
@@ -687,15 +710,17 @@ class MosaicApp:
         ttk.Label(right, text="马赛克倍率（网格数量）", style="Panel.TLabel").pack(
             anchor=tk.W
         )
-        self.grid_var = tk.StringVar(value="64")
+        self.grid_var = tk.StringVar(value="")
+        self.grid_mode = GRID_NATIVE
+        self.current_grid = (1, 1)
         self.grid_box = ttk.Combobox(
             right,
             textvariable=self.grid_var,
-            values=[f"{g}x{g}" for g in MOSAIC_GRIDS],
             state="readonly",
         )
         self.grid_box.pack(fill=tk.X, pady=(2, 6))
-        self.grid_box.bind("<<ComboboxSelected>>", lambda e: self.preview_mosaic())
+        self.grid_box.bind("<<ComboboxSelected>>", self.on_grid_pick)
+        self._sync_grid_box()
 
         self.grid_lines = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -963,10 +988,10 @@ class MosaicApp:
         tw, th = self._draw_size
         left = self._draw_pos[0] - tw / 2
         top = self._draw_pos[1] - th / 2
-        g = self.current_grid
-        i = int((x - left) / tw * g)
-        j = int((y - top) / th * g)
-        if 0 <= i < g and 0 <= j < g:
+        gw, gh = self.current_grid
+        i = int((x - left) / tw * gw)
+        j = int((y - top) / th * gh)
+        if 0 <= i < gw and 0 <= j < gh:
             return i, j
         return None
 
@@ -1266,11 +1291,14 @@ class MosaicApp:
             )
         was_empty = not self.queue
         self.queue.extend(items)
+        # 新导入的图默认按原分辨率看（网格数 = 像素尺寸），切图时不重置
+        self.grid_mode = GRID_NATIVE
         if was_empty:
             self.show_index(0)
         else:
             self._refresh_list()
             self._update_name_preview()
+            self.preview_mosaic()
             self.set_status(
                 f"已添加 {len(items)} 张，当前队列 {len(self.queue)} 张"
             )
@@ -1344,22 +1372,46 @@ class MosaicApp:
         self.preview_mosaic()
         self._update_edit_state()
 
+    def _grid_values(self):
+        item = self.current
+        native = grid_label(GRID_NATIVE, item.img.size) if item else "原分辨率"
+        return [native] + [f"{g}x{g}" for g in MOSAIC_GRIDS]
+
+    def _sync_grid_box(self):
+        """下拉里第一项是随图变化的「原分辨率」，其余是固定方形档。"""
+        self.grid_box.config(values=self._grid_values())
+        idx = 0 if self.grid_mode == GRID_NATIVE else (
+            MOSAIC_GRIDS.index(self.grid_mode) + 1
+            if self.grid_mode in MOSAIC_GRIDS
+            else 0
+        )
+        self.grid_box.current(idx)
+
+    def on_grid_pick(self, event=None):
+        idx = max(self.grid_box.current(), 0)
+        self.grid_mode = GRID_NATIVE if idx == 0 else MOSAIC_GRIDS[idx - 1]
+        self.preview_mosaic()
+
+    def set_grid_mode(self, mode):
+        self.grid_mode = mode
+        self._sync_grid_box()
+        self.preview_mosaic()
+
     def preview_mosaic(self):
         item = self.current
         if item is None:
             return
-        try:
-            grid = int(self.grid_var.get().split("x")[0])
-        except (ValueError, IndexError):
-            grid = 64
+        grid = grid_dims(self.grid_mode, item.img.size)
         self.current_grid = grid
+        self._sync_grid_box()
         self.mosaic_img = apply_mosaic(item.img, grid)
         self.preview_img = apply_patches(self.mosaic_img, item.patches)
         total = len(self.queue)
         pos = f"（第 {self.index + 1}/{total} 张）" if total > 1 else ""
+        label = grid_label(self.grid_mode, item.img.size)
         self.set_status(
             f"已加载{pos}: {os.path.basename(item.path)} "
-            f"({item.img.size[0]}x{item.img.size[1]}) | 预览倍率 {grid}x{grid}"
+            f"({item.img.size[0]}x{item.img.size[1]}) | 预览倍率 {label}"
         )
         self._refresh_palette()
         self._update_name_preview()
@@ -1438,17 +1490,17 @@ class MosaicApp:
         self.canvas.delete("all")
         self.canvas.create_image(ax, ay, image=photo, anchor=tk.CENTER)
         if self.grid_lines.get():
-            g = self.current_grid
-            step_x, step_y = tw / g, th / g
+            gw, gh = self.current_grid
+            step_x, step_y = tw / gw, th / gh
             line_color = self.c["grid_line"]
             if step_x >= 3 and step_y >= 3:
                 x0, y0 = ax - tw / 2, ay - th / 2
-                for i in range(1, g):
+                for i in range(1, gw):
                     x = x0 + i * step_x
                     self.canvas.create_line(
                         x, y0, x, y0 + th, fill=line_color, stipple="gray50"
                     )
-                for j in range(1, g):
+                for j in range(1, gh):
                     y = y0 + j * step_y
                     self.canvas.create_line(
                         x0, y, x0 + tw, y, fill=line_color, stipple="gray50"
@@ -1601,7 +1653,8 @@ class MosaicApp:
                 return
             self._show_overlay(f"正在保存 {n}/{total} · {name}", n / total * 100)
         self.set_status(
-            f"已保存 {total} 张到 {d} | 倍率 {self.current_grid}x{self.current_grid}"
+            f"已保存 {total} 张到 {d} | 倍率 "
+            f"{grid_label(self.grid_mode, self.current.img.size)}"
         )
         self._flash_saved(f"✓ 已保存 {total} 张 → {_short_path(d)}", 2400)
 

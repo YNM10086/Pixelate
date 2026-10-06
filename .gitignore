@@ -1,0 +1,26 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- PyInstaller ----
+build/
+dist/
+*.manifest
+
+# ---- 本机状态 ----
+# 主题偏好（light / dark）
+settings.json
+# 开发会话记忆（内部笔记，不入库）
+_session_context.md
+# make_icon.py 的预览产物
+icon_preview.png
+
+# ---- 编辑器 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

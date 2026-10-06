@@ -1,9 +1,16 @@
 # Pixelate
 
-把图片快速处理成马赛克（网格化）效果并导出，Windows 桌面小工具。
+Windows 桌面小工具，把图片快速处理成马赛克（网格化）效果并导出 PNG。
 
 A small Windows desktop tool that turns any image into a mosaic look — queue
 images, pick a grid size, tweak colors pixel-block by pixel-block, export PNG.
+
+## 下载
+
+**不想装 Python？** 到 [Releases](https://github.com/YNM10086/Pixelate/releases) 下载
+`Pixelate.exe` 双击即可（未签名，SmartScreen 提示「未知发布者」时点「更多信息 → 仍要运行」）。
+
+想自己跑源码或改代码，往下看。
 
 ![screenshot](docs/screenshot.png)
 

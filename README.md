@@ -12,7 +12,11 @@ images, pick a grid size, tweak colors pixel-block by pixel-block, export PNG.
 
 想自己跑源码或改代码，往下看。
 
-![screenshot](docs/screenshot.png)
+| 浅色主题 | 深色主题 |
+|---|---|
+| ![浅色主题](docs/screenshot-light.png) | ![深色主题](docs/screenshot-dark.png) |
+
+（示例图为脚本自绘的合成图，非真实照片）
 
 ## 特点
 
